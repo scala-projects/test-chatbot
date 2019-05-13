@@ -1,26 +1,44 @@
 package chatbot
 
 import java.io.File
-import scalaj.http.{Http, HttpOptions}
+import java.util.Date
+
+import akka.actor._
+import akka.pattern.ask
+import akka.util.Timeout
+
 import scala.collection.immutable.SortedMap
-import scala.concurrent.Future
-import scala.io.Source
 import scala.concurrent.ExecutionContext.Implicits.global
-import scala.util.Random
+import scala.concurrent.Future
+import scala.concurrent.duration.DurationInt
+import scala.io.Source
 
 object ChatBot extends App {
 
   case class Tests(fileName: String, customerInput: String, botResponse: String)
 
   val TestsPath = "./src/main/scala/chatbot/spec"
-  val ShortCode = "12345"
-  val APIAddress = s"API"
-  var Scenery = List.empty[ChatBot.Tests]
+  var Scenarios = List.empty[ChatBot.Tests]
   var FileNames = Map.empty[String, String]
 
-  testBot()
+  implicit val defaultTimeout: Timeout = Timeout(60.seconds)
+  val system = ActorSystem()
+  val completeTestManager = system.actorOf(TestManager.props)
 
-  def getListOfFiles(dir: String):List[File] = {
+  startTests()
+
+  def startTests() = {
+    println("Started: " + new Date)
+    for {
+      _ <- completeTestManager ? FillMapWithFileNameAndRandomPhone(getTestsInMap.keys.toList)
+      _ <- testBot()
+    } yield {
+      println("Finished: " + new Date)
+      ()
+    }
+  }
+
+  def getListOfFiles(dir: String): List[File] = {
     val d = new File(dir)
     if (d.exists && d.isDirectory) {
       d.listFiles.filter(_.isFile).toList
@@ -40,54 +58,35 @@ object ChatBot extends App {
   }
 
 
-  def testBot():Unit = {
+  def testBot() = {
     val mapScenario = getTestsInMap
-    val getFileNames = mapScenario.keys.toList
+    val fileNames = mapScenario.keys.toList
 
-    println(s"TESTS DETECTED: ${getFileNames.length}")
-    val response = for {
-      i <- getFileNames.indices  // getfileNames.length
-      resultF = runTests(mapScenario, getFileNames, i)
-//      j <-getfileNames.length/2 until getfileNames.length
-//      result2F = runTests(mapScenery, getfileNames, j)
-    } yield resultF
+    println(s"TESTS DETECTED: ${fileNames.length}")
+    val responseF1 = Future.sequence((0 until fileNames.length / 2).map { i =>
+      (completeTestManager ? CompleteTests(mapScenario, fileNames, i)).mapTo[(Int, Int)]
+    })
+    val responseF2 = Future.sequence((fileNames.length / 2 until fileNames.size).map { j =>
+      (completeTestManager ? CompleteTests(mapScenario, fileNames, j)).mapTo[(Int, Int)]
+    })
 
-//    Thread.sleep(10000)
-    val finalErrorResult = response.toList.map(_._1).sum
-    val finalSuccessResult = response.toList.map(_._2).sum
-    println("===============")
-    println("ERROR: " + finalErrorResult)
-    println("SUCCESS: " + finalSuccessResult)
-    println("===============")
-
-
-
-  }
-
-  def runTests(mapScenario: Map[String, List[ChatBot.Tests]], fileName: List[String], i: Int): (Int, Int) =  {
-//  def runTests(mapScenery: Map[String, List[ChatBot.Tests]], fileName: List[String], i: Int): Future[(Int, Int)] = Future {  // for parallel requests
-    var done = 0
-    var error = 0
-    var currentTestFile = ""
-    var failedTestKey = ""
-    val getList = mapScenario(fileName(i))
-    println(getList.head.fileName + "_convo.txt is running...")
-    getList.foreach { key =>
-      if (failedTestKey != key.customerInput) {
-        val response = callApiAndSendMsg(key.customerInput, key.fileName)
-        if (response != key.botResponse) {
-          error += 1
-          println(s"ERROR in file: ${key.fileName}:\n\n'$response' doesn't match: '${key.botResponse}'\n")
-          failedTestKey = key.customerInput
-        } else if (currentTestFile != key.fileName) {
-          done += 1
-        }
-      }
-      if (currentTestFile != key.fileName) {
-        currentTestFile = key.fileName
-      }
+    (for {
+      r1 <- responseF1
+      r2 <- responseF2
+    } yield {
+      val errorsF = r1.toList.map(_._1) ::: r2.toList.map(_._1)
+      val successF = r1.toList.map(_._2) ::: r2.toList.map(_._2)
+      (errorsF.sum, successF.sum)
+    }).map { results =>
+      println("===============")
+      println("ERROR: " + results._1)
+      println("SUCCESS: " + results._2)
+      println("===============")
+    }.recover {
+      case error =>
+        sys.error(error.toString)
     }
-    (error, done)
+
   }
 
   def getTestsInMap: Map[String, List[ChatBot.Tests]] = {
@@ -96,36 +95,15 @@ object ChatBot extends App {
       val list = readFromFile(a).toList.filterNot(p => p == "" || p == "#bot" || p == "#me")
       i = 1
       while (i < list.length - 1) {
-        Scenery = Scenery :+ Tests(list.head, list(i), list(i + 1))
+        Scenarios = Scenarios :+ Tests(list.head, list(i), list(i + 1))
         i += 2
       }
     }
-    SortedMap(Scenery.groupBy(_.fileName).toSeq:_*)
-  }
-
-  def callApiAndSendMsg(key: String, fileName: String): String = {
-    val randomPhone = if (FileNames.nonEmpty && FileNames.contains(fileName)) {
-      FileNames(fileName)
-    } else {
-      val newRandomPhone = getRandomDigits(10)
-      FileNames = FileNames + (fileName -> newRandomPhone)
-      newRandomPhone
-    }
-    val data = s"""{"from":"$randomPhone","to":"$ShortCode","body":"$key"}"""
-    Http(s"$APIAddress").postData(data)
-      .header("Content-Type", "application/json")
-      .header("Charset", "UTF-8")
-      .option(HttpOptions.readTimeout(10000)).asString.body.replaceAll("\\s+", " ").split('\n').map(_.trim.filter(_ >= ' ')).mkString(" ")
-//    val map = Map.empty[String, String]  //to test need to fill Map
-//    map(key)
+    SortedMap(Scenarios.groupBy(_.fileName).toSeq: _*)
   }
 
   def readFromFile(file: String): Iterator[String] = {
     for (line <- Source.fromFile(file).getLines) yield line
-  }
-
-  def getRandomDigits(length: Int) = {
-    Seq.fill(length)(Random.nextInt(9)).mkString("")
   }
 
 }

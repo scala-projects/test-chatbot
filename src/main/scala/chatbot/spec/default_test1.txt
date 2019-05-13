@@ -1,0 +1,19 @@
+default_test1
+
+#me
+Hi
+
+#bot
+Hello! How I can help you?
+
+#me
+What can you do?
+
+#bot
+I can help you to improve your knowledge in Scala Programming
+
+#me
+Wow! Great!
+
+#bot
+Let's start
